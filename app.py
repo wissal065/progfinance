@@ -7,6 +7,7 @@ from scipy.stats import norm
 
 
 # ==================================================
+# Fonctions utilitaires Black-Scholes
 # Black-Scholes helper functions
 # ==================================================
 def bs_d1(S: float, K: float, tau: float, r: float, sigma: float) -> float:
@@ -21,6 +22,10 @@ def bs_d2(S: float, K: float, tau: float, r: float, sigma: float) -> float:
 
 def bs_price_delta(option_type: str, S: float, K: float, tau: float, r: float, sigma: float) -> tuple[float, float]:
     """
+    Retourne le prix Black-Scholes et le delta d'une option.
+    Sens financier :
+    - prix = valeur mark-to-model dans l'état de marché courant
+    - delta = sensibilité locale au sous-jacent, utilisée pour le rééquilibrage de couverture
     Returns Black-Scholes price and delta for one option.
     Financial meaning:
     - price = marked-to-model value for current market state
@@ -50,6 +55,16 @@ def bs_price_delta(option_type: str, S: float, K: float, tau: float, r: float, s
 
 
 # ==================================================
+# Construction des stratégies et des simulations
+# ==================================================
+def build_strategy(strategy: str, S0: float, qty: float, width_pct: float) -> list[dict]:
+    """Construit les jambes du portefeuille (quantité positive = position longue)."""
+    width = S0 * width_pct
+
+    if strategy == "Call long":
+        return [{"type": "call", "K": S0, "qty": qty}]
+
+    if strategy == "Put long":
 # Strategy and simulation builders
 # ==================================================
 def build_strategy(strategy: str, S0: float, qty: float, width_pct: float) -> list[dict]:
@@ -74,12 +89,14 @@ def build_strategy(strategy: str, S0: float, qty: float, width_pct: float) -> li
             {"type": "put", "K": max(S0 - width, 1.0), "qty": qty},
         ]
 
+    if strategy == "Call spread haussier":
     if strategy == "Bull call spread":
         return [
             {"type": "call", "K": S0, "qty": qty},
             {"type": "call", "K": S0 + width, "qty": -qty},
         ]
 
+    # Portefeuille personnalisé : version simple à 2 jambes
     # Custom portfolio: simple 2-leg builder
     return [
         {"type": "call", "K": S0, "qty": qty},
@@ -88,6 +105,7 @@ def build_strategy(strategy: str, S0: float, qty: float, width_pct: float) -> li
 
 
 def simulate_underlying_path(S0: float, mu: float, sigma_real: float, T: float, n_steps: int, seed: int) -> np.ndarray:
+    """Simule la trajectoire réalisée du marché (impacte la PnL de couverture et la volatilité réalisée)."""
     """Simulates realized market path (this drives actual hedge PnL and realized volatility)."""
     rng = np.random.default_rng(seed)
     dt = T / (n_steps - 1)
@@ -110,11 +128,17 @@ def simulate_implied_vol_path(
     high_regime: float,
     seed: int,
 ) -> np.ndarray:
+    """Simule la volatilité implicite utilisée pour le repricing à chaque pas de temps."""
     """Simulates the implied vol used for repricing at each time step."""
     rng = np.random.default_rng(seed)
     vols = np.zeros(n_steps)
     vols[0] = sigma0
 
+    if mode == "Bruit stochastique":
+        for t in range(1, n_steps):
+            vols[t] = max(0.05, vols[t - 1] + rng.normal(0, vol_noise))
+    else:
+        # Changement de régime : bas niveau de vol -> haut niveau -> normalisation partielle
     if mode == "Stochastic noise":
         for t in range(1, n_steps):
             vols[t] = max(0.05, vols[t - 1] + rng.normal(0, vol_noise))
@@ -151,6 +175,8 @@ def run_dynamic_hedged_backtest(
     tx_cost_rate: float,
 ) -> pd.DataFrame:
     """
+    Reprice le portefeuille complet à chaque étape et couvre dynamiquement le delta avec le sous-jacent.
+    Modèle de friction de marché : coût = tx_cost_rate * |variation de couverture| * S
     Reprices the full option portfolio each step and dynamically delta hedges using underlying shares.
     Trading friction model: cost = tx_cost_rate * |change in hedge| * S
     """
@@ -172,6 +198,7 @@ def run_dynamic_hedged_backtest(
         S_t = float(S_path[i])
         sigma_t = float(iv_path[i])
 
+        # 1) Valorisation du portefeuille d'options et delta agrégé
         # 1) Mark option portfolio and total option delta
         opt_val_t = 0.0
         opt_delta_t = 0.0
@@ -183,6 +210,11 @@ def run_dynamic_hedged_backtest(
         option_values[i] = opt_val_t
         portfolio_delta[i] = opt_delta_t
 
+        # 2) Le compte cash rémunère au taux sans risque entre deux rééquilibrages
+        if i > 0:
+            cash *= (1.0 + r * dt)
+
+        # 3) Rééquilibrer la couverture sur -delta (objectif delta-neutre)
         # 2) Cash account earns risk-free between rehedges
         if i > 0:
             cash *= (1.0 + r * dt)
@@ -200,6 +232,7 @@ def run_dynamic_hedged_backtest(
         hedge_shares[i] = h_new
         cumulative_tc[i] = tc_cum
 
+        # 4) PnL du portefeuille couvert dans le temps
         # 4) Hedged portfolio PnL over time
         total_mark_to_market = opt_val_t + h_new * S_t + cash
         pnl[i] = total_mark_to_market
@@ -221,6 +254,7 @@ def run_dynamic_hedged_backtest(
 
 
 def make_smooth_vs_volatile_paths(S0: float, ST: float, n_steps: int, bump: float) -> tuple[np.ndarray, np.ndarray]:
+    """Deux trajectoires avec même prix initial/final, mais dynamiques très différentes."""
     """Two paths with same start and end price, but very different path characteristics."""
     x = np.linspace(0, 1, n_steps)
     smooth = S0 + (ST - S0) * x
@@ -236,6 +270,9 @@ def load_prices(ticker: str, period: str) -> pd.DataFrame:
 
 
 # ==================================================
+# Configuration de la page et style
+# ==================================================
+st.set_page_config(page_title="Pricer dynamique de portefeuille d'options", layout="wide", initial_sidebar_state="expanded")
 # Page config and style
 # ==================================================
 st.set_page_config(page_title="Dynamic Option Portfolio Pricer", layout="wide", initial_sidebar_state="expanded")
@@ -258,6 +295,61 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+st.title("Pricer dynamique de portefeuille d'options")
+st.caption(
+    "Pourquoi le pricing ponctuel ne suffit pas : repricing dynamique, volatilité implicite changeante, couverture delta et risque de trajectoire."
+)
+
+
+# ==================================================
+# Contrôles de la barre latérale
+# ==================================================
+st.sidebar.header("Contrôles portefeuille + simulation")
+
+strategy = st.sidebar.selectbox(
+    "Stratégie",
+    ["Call long", "Put long", "Straddle", "Strangle", "Call spread haussier", "Portefeuille personnalisé"],
+)
+
+S0 = st.sidebar.number_input("Prix initial du sous-jacent S0", min_value=10.0, max_value=1000.0, value=100.0, step=1.0)
+T = st.sidebar.slider("Horizon / maturité (années)", 0.1, 2.0, 1.0, 0.05)
+r = st.sidebar.slider("Taux sans risque r", 0.0, 0.10, 0.03, 0.005)
+qty = st.sidebar.slider("Contrats par jambe", 1.0, 10.0, 1.0, 1.0)
+width_pct = st.sidebar.slider("Écart de strike (% de S0) pour spreads/strangles", 0.05, 0.35, 0.10, 0.01)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Hypothèses de trajectoire")
+mu = st.sidebar.slider("Dérive du sous-jacent μ", -0.05, 0.15, 0.03, 0.01)
+sigma_real = st.sidebar.slider("Hypothèse de volatilité réalisée", 0.05, 0.80, 0.20, 0.01)
+n_steps = st.sidebar.slider("Nombre de pas (repricing / couverture)", 20, 300, 120, 10)
+seed = st.sidebar.number_input("Graine aléatoire", min_value=0, max_value=99999, value=42)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Dynamique de volatilité implicite")
+iv_mode = st.sidebar.selectbox("Modèle de trajectoire de VI", ["Bruit stochastique", "Changement de régimes"])
+sigma0 = st.sidebar.slider("Volatilité implicite initiale σ0", 0.05, 0.90, 0.25, 0.01)
+vol_noise = st.sidebar.slider("Niveau de bruit de VI", 0.0, 0.08, 0.01, 0.001)
+low_regime = st.sidebar.slider("Régime VI bas", 0.05, 0.60, 0.18, 0.01)
+high_regime = st.sidebar.slider("Régime VI haut", 0.10, 1.00, 0.40, 0.01)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Friction de couverture")
+tx_cost_rate = st.sidebar.slider("Coût de transaction proportionnel", 0.0, 0.01, 0.001, 0.0001)
+
+
+# ==================================================
+# Construction du portefeuille (avec jambes personnalisées)
+# ==================================================
+legs = build_strategy(strategy, S0, qty, width_pct)
+if strategy == "Portefeuille personnalisé":
+    st.sidebar.markdown("Jambes du portefeuille personnalisé")
+    c1, c2 = st.sidebar.columns(2)
+    call_k = c1.number_input("Strike call", min_value=1.0, value=float(S0), step=1.0)
+    call_q = c2.slider("Quantité call", -5.0, 5.0, 1.0, 1.0)
+
+    c3, c4 = st.sidebar.columns(2)
+    put_k = c3.number_input("Strike put", min_value=1.0, value=float(S0), step=1.0)
+    put_q = c4.slider("Quantité put", -5.0, 5.0, 0.0, 1.0)
 st.title("Dynamic Option-Portfolio Pricer")
 st.caption(
     "Why one-shot option pricing is not enough: dynamic repricing, changing implied vol, hedging, and path risk."
@@ -321,6 +413,7 @@ if strategy == "Custom portfolio":
 
 
 # ==================================================
+# Données principales de simulation
 # Main simulation data
 # ==================================================
 S_path = simulate_underlying_path(S0, mu, sigma_real, T, n_steps, int(seed))
@@ -340,6 +433,14 @@ summary = {
 
 
 # ==================================================
+# Onglets
+# ==================================================
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["Théorie / intuition", "Simulateur dynamique de portefeuille", "Comparaison du risque de trajectoire", "Intuition marché réel"]
+)
+
+# --------------------------------------------------
+# Onglet 1 - Théorie
 # Tabs
 # ==================================================
 tab1, tab2, tab3, tab4 = st.tabs(
@@ -352,6 +453,14 @@ tab1, tab2, tab3, tab4 = st.tabs(
 with tab1:
     c1, c2 = st.columns([1.1, 1])
     with c1:
+        st.subheader("Pourquoi un pricing Black-Scholes statique est insuffisant")
+        st.markdown(
+            """
+            - Les traders gèrent des **portefeuilles d'options**, pas des contrats isolés.
+            - Le portefeuille doit être **repricé à chaque pas de temps** car :\
+              prix du sous-jacent, temps restant et volatilité implicite évoluent.
+            - Le delta n'est pas constant, donc la couverture doit être rééquilibrée dynamiquement.
+            - Le rééquilibrage crée des **coûts de trading**, ce qui rend la PnL dépendante de la trajectoire.
         st.subheader("Why static Black-Scholes pricing is insufficient")
         st.markdown(
             """
@@ -366,6 +475,32 @@ with tab1:
         st.latex(r"\text{PnL}_t = V_{\text{options},t} + h_t S_t + \text{cash}_t")
 
     with c2:
+        st.subheader("Jambes de stratégie actuelles")
+        st.dataframe(pd.DataFrame(legs), use_container_width=True, hide_index=True)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Volatilité réalisée (trajectoire)", f"{summary['realized_vol']:.2%}")
+        m2.metric("Volatilité implicite moyenne", f"{summary['avg_implied_vol']:.2%}")
+        m3.metric("Taux de coût de transaction", f"{tx_cost_rate:.3%}")
+
+    st.info(
+        "En pratique, la volatilité implicite est souvent supérieure à la volatilité réalisée, car les vendeurs d'options exigent une prime pour le risque et les frictions de marché."
+    )
+
+# --------------------------------------------------
+# Onglet 2 - Simulateur dynamique
+# --------------------------------------------------
+with tab2:
+    st.subheader("Résultats du repricing dynamique et de la couverture delta")
+
+    r1c1, r1c2, r1c3 = st.columns(3)
+    r1c1.metric("Valeur initiale du portefeuille", f"{summary['initial_portfolio_value']:.2f}")
+    r1c2.metric("Valeur finale du portefeuille", f"{summary['final_portfolio_value']:.2f}")
+    r1c3.metric("PnL réalisée (couverte)", f"{summary['realized_pnl']:.2f}")
+
+    r2c1, r2c2, r2c3 = st.columns(3)
+    r2c1.metric("Coûts de transaction totaux", f"{summary['total_tx_costs']:.2f}")
+    r2c2.metric("Volatilité réalisée", f"{summary['realized_vol']:.2%}")
+    r2c3.metric("Volatilité implicite moyenne", f"{summary['avg_implied_vol']:.2%}")
         st.subheader("Current strategy legs")
         st.dataframe(pd.DataFrame(legs), use_container_width=True, hide_index=True)
         m1, m2, m3 = st.columns(3)
@@ -397,12 +532,14 @@ with tab2:
     with g1:
         fig_s = go.Figure()
         fig_s.add_trace(go.Scatter(y=base_df["underlying"], mode="lines", name="Underlying", line=dict(width=2)))
+        fig_s.update_layout(title="Trajectoire du sous-jacent", xaxis_title="Pas", yaxis_title="Prix", template="plotly_dark", height=300, margin=dict(l=20, r=20, t=40, b=20))
         fig_s.update_layout(title="Underlying price path", xaxis_title="Step", yaxis_title="Price", template="plotly_dark", height=300, margin=dict(l=20, r=20, t=40, b=20))
         st.plotly_chart(fig_s, use_container_width=True)
 
     with g2:
         fig_iv = go.Figure()
         fig_iv.add_trace(go.Scatter(y=base_df["implied_vol"], mode="lines", name="Implied vol", line=dict(width=2)))
+        fig_iv.update_layout(title="Trajectoire de volatilité implicite", xaxis_title="Pas", yaxis_title="Volatilité", template="plotly_dark", height=300, margin=dict(l=20, r=20, t=40, b=20))
         fig_iv.update_layout(title="Implied volatility path", xaxis_title="Step", yaxis_title="Volatility", template="plotly_dark", height=300, margin=dict(l=20, r=20, t=40, b=20))
         st.plotly_chart(fig_iv, use_container_width=True)
 
@@ -410,12 +547,14 @@ with tab2:
     with g3:
         fig_v = go.Figure()
         fig_v.add_trace(go.Scatter(y=base_df["option_value"], mode="lines", name="Option portfolio", line=dict(width=2)))
+        fig_v.update_layout(title="Valeur du portefeuille d'options", xaxis_title="Pas", yaxis_title="Valeur", template="plotly_dark", height=300, margin=dict(l=20, r=20, t=40, b=20))
         fig_v.update_layout(title="Portfolio option value", xaxis_title="Step", yaxis_title="Value", template="plotly_dark", height=300, margin=dict(l=20, r=20, t=40, b=20))
         st.plotly_chart(fig_v, use_container_width=True)
 
     with g4:
         fig_d = go.Figure()
         fig_d.add_trace(go.Scatter(y=base_df["portfolio_delta"], mode="lines", name="Portfolio delta", line=dict(width=2)))
+        fig_d.update_layout(title="Delta du portefeuille", xaxis_title="Pas", yaxis_title="Delta", template="plotly_dark", height=300, margin=dict(l=20, r=20, t=40, b=20))
         fig_d.update_layout(title="Portfolio delta", xaxis_title="Step", yaxis_title="Delta", template="plotly_dark", height=300, margin=dict(l=20, r=20, t=40, b=20))
         st.plotly_chart(fig_d, use_container_width=True)
 
@@ -423,12 +562,26 @@ with tab2:
     with g5:
         fig_tc = go.Figure()
         fig_tc.add_trace(go.Scatter(y=base_df["cum_tx_cost"], mode="lines", name="Cumulative costs", line=dict(width=2)))
+        fig_tc.update_layout(title="Coûts de transaction cumulés", xaxis_title="Pas", yaxis_title="Coût", template="plotly_dark", height=300, margin=dict(l=20, r=20, t=40, b=20))
         fig_tc.update_layout(title="Cumulative transaction costs", xaxis_title="Step", yaxis_title="Cost", template="plotly_dark", height=300, margin=dict(l=20, r=20, t=40, b=20))
         st.plotly_chart(fig_tc, use_container_width=True)
 
     with g6:
         fig_p = go.Figure()
         fig_p.add_trace(go.Scatter(y=base_df["pnl"], mode="lines", name="PnL", line=dict(width=2)))
+        fig_p.update_layout(title="PnL couverte au cours du temps", xaxis_title="Pas", yaxis_title="PnL", template="plotly_dark", height=300, margin=dict(l=20, r=20, t=40, b=20))
+        st.plotly_chart(fig_p, use_container_width=True)
+
+    st.markdown("#### Tableau de synthèse")
+    summary_df = pd.DataFrame(
+        {
+            "Metric": [
+                "Valeur initiale du portefeuille",
+                "Valeur finale du portefeuille",
+                "PnL réalisée",
+                "Coûts de transaction totaux",
+                "Volatilité réalisée",
+                "Volatilité implicite moyenne",
         fig_p.update_layout(title="Hedged PnL over time", xaxis_title="Step", yaxis_title="PnL", template="plotly_dark", height=300, margin=dict(l=20, r=20, t=40, b=20))
         st.plotly_chart(fig_p, use_container_width=True)
 
@@ -456,6 +609,12 @@ with tab2:
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
 # --------------------------------------------------
+# Onglet 3 - Comparaison du risque de trajectoire
+# --------------------------------------------------
+with tab3:
+    st.subheader("Même prix terminal, trajectoire différente -> PnL différente")
+    ST = st.slider("Prix terminal commun pour les trajectoires A et B", 0.7 * S0, 1.3 * S0, S0, 1.0)
+    bump = st.slider("Intensité de volatilité pour la trajectoire B", 1.0, 40.0, 12.0, 1.0)
 # Tab 3 - Path risk comparison
 # --------------------------------------------------
 with tab3:
@@ -472,6 +631,9 @@ with tab3:
     cpa, cpb, cpd = st.columns(3)
     pnl_a = float(res_a["pnl"].iloc[-1])
     pnl_b = float(res_b["pnl"].iloc[-1])
+    cpa.metric("PnL finale - Trajectoire A (lisse)", f"{pnl_a:.2f}")
+    cpb.metric("PnL finale - Trajectoire B (volatile)", f"{pnl_b:.2f}")
+    cpd.metric("Écart de PnL", f"{(pnl_b - pnl_a):.2f}")
     cpa.metric("Final PnL - Path A (smooth)", f"{pnl_a:.2f}")
     cpb.metric("Final PnL - Path B (volatile)", f"{pnl_b:.2f}")
     cpd.metric("PnL difference", f"{(pnl_b - pnl_a):.2f}")
@@ -479,6 +641,9 @@ with tab3:
     ga, gb = st.columns(2)
     with ga:
         fig_path = go.Figure()
+        fig_path.add_trace(go.Scatter(y=res_a["underlying"], name="Trajectoire A (lisse)", line=dict(width=2)))
+        fig_path.add_trace(go.Scatter(y=res_b["underlying"], name="Trajectoire B (volatile)", line=dict(width=2)))
+        fig_path.update_layout(title="Trajectoires du sous-jacent (même début et fin)", xaxis_title="Pas", yaxis_title="Prix", template="plotly_dark", height=340, margin=dict(l=20, r=20, t=40, b=20))
         fig_path.add_trace(go.Scatter(y=res_a["underlying"], name="Path A (smooth)", line=dict(width=2)))
         fig_path.add_trace(go.Scatter(y=res_b["underlying"], name="Path B (volatile)", line=dict(width=2)))
         fig_path.update_layout(title="Underlying paths (same start and end)", xaxis_title="Step", yaxis_title="Price", template="plotly_dark", height=340, margin=dict(l=20, r=20, t=40, b=20))
@@ -486,6 +651,9 @@ with tab3:
 
     with gb:
         fig_cmp = go.Figure()
+        fig_cmp.add_trace(go.Scatter(y=res_a["pnl"], name="PnL Trajectoire A", line=dict(width=2)))
+        fig_cmp.add_trace(go.Scatter(y=res_b["pnl"], name="PnL Trajectoire B", line=dict(width=2)))
+        fig_cmp.update_layout(title="Comparaison des trajectoires de PnL", xaxis_title="Pas", yaxis_title="PnL", template="plotly_dark", height=340, margin=dict(l=20, r=20, t=40, b=20))
         fig_cmp.add_trace(go.Scatter(y=res_a["pnl"], name="PnL Path A", line=dict(width=2)))
         fig_cmp.add_trace(go.Scatter(y=res_b["pnl"], name="PnL Path B", line=dict(width=2)))
         fig_cmp.update_layout(title="PnL path comparison", xaxis_title="Step", yaxis_title="PnL", template="plotly_dark", height=340, margin=dict(l=20, r=20, t=40, b=20))
@@ -493,6 +661,18 @@ with tab3:
 
     st.markdown(
         """
+        **Interprétation :**
+        - Les deux trajectoires finissent au même prix, donc une vision terminale naïve suggère des résultats identiques.
+        - En couverture dynamique, on traite à des prix intermédiaires, avec un coût à chaque rééquilibrage.
+        - Donc la **forme de la trajectoire compte** : une trajectoire plus heurtée force souvent plus d'ajustements (ou plus gros) et plus de coûts.
+        """
+    )
+
+# --------------------------------------------------
+# Onglet 4 - Intuition marché réel
+# --------------------------------------------------
+with tab4:
+    st.subheader("Volatilité réalisée historique vs volatilité implicite supposée")
         **Interpretation:**
         - Both paths end at the same underlying price, so a naive terminal-only view may say outcomes should match.
         - In dynamic hedging, the hedge is traded at intermediate prices, and each rebalance incurs cost.
@@ -511,11 +691,14 @@ with tab4:
         "Microsoft": "MSFT",
         "NVIDIA": "NVDA",
         "Tesla": "TSLA",
+        "ETF SPY": "SPY",
         "SPY ETF": "SPY",
     }
 
     rc1, rc2, rc3 = st.columns(3)
     stock_name = rc1.selectbox("Ticker", list(ticker_map.keys()))
+    period = rc2.selectbox("Fenêtre historique", ["6mo", "1y", "2y"], index=1)
+    implied_assumption = rc3.slider("Hypothèse utilisateur de volatilité implicite", 0.05, 1.00, 0.30, 0.01)
     period = rc2.selectbox("History window", ["6mo", "1y", "2y"], index=1)
     implied_assumption = rc3.slider("User implied vol assumption", 0.05, 1.00, 0.30, 0.01)
 
@@ -523,6 +706,7 @@ with tab4:
     raw = load_prices(ticker, period)
 
     if raw.empty:
+        st.warning("Impossible de récupérer les données de marché pour ce ticker actuellement.")
         st.warning("Could not fetch market data for this ticker right now.")
     else:
         close = raw["Close"]
@@ -541,6 +725,10 @@ with tab4:
         bs_price_implied, _ = bs_price_delta("call", S_last, S_last, T_mini, r, implied_assumption)
 
         k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Dernier prix", f"{S_last:.2f}")
+        k2.metric("Volatilité historique réalisée", f"{hist_vol:.2%}")
+        k3.metric("Volatilité implicite supposée", f"{implied_assumption:.2%}")
+        k4.metric("Écart de prime call ATM 30j", f"{(bs_price_implied - bs_price_hist):.2f}")
         k1.metric("Last price", f"{S_last:.2f}")
         k2.metric("Realized hist vol", f"{hist_vol:.2%}")
         k3.metric("Assumed implied vol", f"{implied_assumption:.2%}")
@@ -550,17 +738,24 @@ with tab4:
         with h1:
             f_close = go.Figure()
             f_close.add_trace(go.Scatter(x=close.index, y=close.values, mode="lines", name="Close", line=dict(width=2)))
+            f_close.update_layout(title=f"Historique de prix {ticker}", xaxis_title="Date", yaxis_title="Prix", template="plotly_dark", height=320, margin=dict(l=20, r=20, t=40, b=20))
             f_close.update_layout(title=f"{ticker} price history", xaxis_title="Date", yaxis_title="Price", template="plotly_dark", height=320, margin=dict(l=20, r=20, t=40, b=20))
             st.plotly_chart(f_close, use_container_width=True)
 
         with h2:
             f_ret = go.Figure()
             f_ret.add_trace(go.Scatter(x=ret.index, y=ret.values, mode="lines", name="Log returns", line=dict(width=1.6)))
+            f_ret.update_layout(title=f"Rendements logarithmiques {ticker}", xaxis_title="Date", yaxis_title="Rendement log", template="plotly_dark", height=320, margin=dict(l=20, r=20, t=40, b=20))
             f_ret.update_layout(title=f"{ticker} log returns", xaxis_title="Date", yaxis_title="Log return", template="plotly_dark", height=320, margin=dict(l=20, r=20, t=40, b=20))
             st.plotly_chart(f_ret, use_container_width=True)
 
         st.markdown(
             """
+            ### Pourquoi la volatilité implicite est souvent au-dessus de la volatilité réalisée
+            1. **Prime de risque de marché** : les vendeurs d'options demandent une compensation pour le risque de krach / risque de queue.
+            2. **Contraintes de liquidité** : porter le risque optionnel et l'impact de marché coûtent cher.
+            3. **Déséquilibre offre/demande** : la demande persistante de protection fait monter les prix d'options.
+            4. **Périodes de stress et pression de couverture** : en marché agité, les flux de hedging peuvent pousser la VI vers le haut.
             ### Why implied volatility is often above realized volatility
             1. **Market risk premium**: option sellers demand compensation for bearing crash/tail risk.
             2. **Liquidity constraints**: warehousing option risk and market impact are costly.
@@ -570,4 +765,5 @@ with tab4:
         )
 
 st.divider()
+st.caption("Dashboard pédagogique : repricing dynamique de portefeuille d'options sous volatilité implicite variable et frictions de trading.")
 st.caption("Educational project dashboard: dynamic portfolio repricing under changing implied volatility and trading frictions.")
